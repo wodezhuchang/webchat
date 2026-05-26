@@ -1,0 +1,15 @@
+{
+    "server": {
+        "host": "10.132.5.101",
+        "port": 8888
+    },
+    "deepseek": {
+        "api_url": "https://api.deepseek.com/v1/chat/completions",
+        "api_key": "sk-cebda343c7654efe936dd8916dcec3b7",
+        "timeout": 30
+    },
+    "heartbeat": {
+        "interval": 30,
+        "timeout": 60
+    }
+}

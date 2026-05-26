@@ -1,0 +1,9 @@
+{
+    "server": {
+        "host": "10.132.5.101",
+        "port": 8888
+    },
+    "heartbeat": {
+        "interval": 30
+    }
+}
