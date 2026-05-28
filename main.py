@@ -23,11 +23,11 @@ app.include_router(router, prefix="/api")
 async def websocket_endpoint(websocket: WebSocket, username: str):
     await websocket.accept()
     
-    # 同用户踢旧连接
+    # 简化逻辑：直接记录用户连接，不踢旧连接（让前端重连处理）
     if username in online_users:
-        old_ws = online_users[username]
         try:
-            await old_ws.close(code=1008, reason="重复登录")
+            old_ws = online_users[username]
+            await old_ws.close(code=1008, reason="检测到新的连接")
         except:
             pass
     
@@ -36,14 +36,14 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
     if username not in chat_histories:
         chat_histories[username] = []
     
-    print(f"✅ 用户 {username} 连接成功")
+    print(f"✅ 用户 {username} 连接成功，在线用户数: {len(online_users)}")
     
     try:
         while True:
             try:
                 data = await websocket.receive_json()
             except Exception as e:
-                print("❌ 接收消息异常:", e)
+                print(f"❌ 用户 {username} 接收消息异常:", e)
                 break
             
             message_type = data.get("type")
@@ -85,8 +85,9 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
     except WebSocketDisconnect:
         print(f"👋 用户 {username} 主动断开")
     finally:
-        online_users.pop(username, None)
-        print(f"🧹 用户 {username} 资源清理完毕")
+        if username in online_users and online_users[username] == websocket:
+            online_users.pop(username, None)
+            print(f"🧹 用户 {username} 资源清理完毕，在线用户数: {len(online_users)}")
 
 
 @app.get("/")
