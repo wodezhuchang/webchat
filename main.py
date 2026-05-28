@@ -2,8 +2,9 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from routes import router
 from config import settings
-from utils import chat_histories, online_users
+from utils import chat_histories, online_users, call_deepseek_async
 from models import Message, UserInfo
+import asyncio
 
 app = FastAPI(title="Chat WebAPI", version="1.0.0", description="基于FastAPI的聊天系统后端接口")
 
@@ -21,22 +22,43 @@ app.include_router(router, prefix="/api")
 @app.websocket("/ws/{username}")
 async def websocket_endpoint(websocket: WebSocket, username: str):
     await websocket.accept()
+    
+    # 同用户踢旧连接
+    if username in online_users:
+        old_ws = online_users[username]
+        try:
+            await old_ws.close(code=1008, reason="重复登录")
+        except:
+            pass
+    
     online_users[username] = websocket
     
     if username not in chat_histories:
         chat_histories[username] = []
     
+    print(f"✅ 用户 {username} 连接成功")
+    
     try:
         while True:
-            data = await websocket.receive_json()
+            try:
+                data = await websocket.receive_json()
+            except Exception as e:
+                print("❌ 接收消息异常:", e)
+                break
+            
             message_type = data.get("type")
             content = data.get("content", "")
             
             if message_type == "ai":
-                from utils import call_deepseek_async
                 history = chat_histories[username]
                 history.append({"role": "user", "content": content})
-                answer = await call_deepseek_async(history)
+                try:
+                    answer = await asyncio.wait_for(call_deepseek_async(history), timeout=15)
+                except asyncio.TimeoutError:
+                    answer = "请求超时，请重试"
+                except Exception as e:
+                    answer = f"AI 出错：{str(e)}"
+                
                 history.append({"role": "assistant", "content": answer})
                 await websocket.send_json({"type": "ai", "content": answer})
             
@@ -61,8 +83,10 @@ async def websocket_endpoint(websocket: WebSocket, username: str):
                 await websocket.send_json({"type": "pong"})
     
     except WebSocketDisconnect:
+        print(f"👋 用户 {username} 主动断开")
+    finally:
         online_users.pop(username, None)
-        print(f"用户 {username} 已断开连接")
+        print(f"🧹 用户 {username} 资源清理完毕")
 
 
 @app.get("/")
