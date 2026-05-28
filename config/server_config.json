@@ -1,7 +1,7 @@
 {
     "server": {
-        "host": "10.132.5.101",
-        "port": 8888
+        "host": "0.0.0.0",
+        "port": 8000
     },
     "deepseek": {
         "api_url": "https://api.deepseek.com/v1/chat/completions",
@@ -11,5 +11,10 @@
     "heartbeat": {
         "interval": 30,
         "timeout": 60
+    },
+    "cors": {
+        "allow_origins": ["*"],
+        "allow_methods": ["*"],
+        "allow_headers": ["*"]
     }
 }
