@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from sqlalchemy.orm import Session
 from datetime import datetime
 from database.models import User, Session as DbSession, Message, TokenBlacklist
@@ -175,7 +175,7 @@ def get_session_messages(
     page: int = 1,
     limit: int = 20,
     status: Optional[int] = 1
-) -> tuple[List[Message], int]:
+) -> Tuple[List[Message], int]:
     query = db.query(Message).filter(Message.session_id == session_id)
     
     if status is not None:
