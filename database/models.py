@@ -30,7 +30,12 @@ class User(Base):
         comment="更新时间"
     )
     
-    sessions = relationship("Session", back_populates="user", cascade="all, delete-orphan")
+    sessions = relationship(
+        "Session",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="Session.user_id"
+    )
     
     __table_args__ = (
         Index("idx_username", "username"),
