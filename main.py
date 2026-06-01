@@ -6,6 +6,14 @@ from utils import chat_histories, online_users, call_deepseek_async
 from models import Message, UserInfo
 import asyncio
 
+from api.auth import router as auth_router
+from api.sessions import router as sessions_router
+from api.messages import router as messages_router
+from database.connection import engine
+from database import models
+
+models.Base.metadata.create_all(bind=engine)
+
 app = FastAPI(title="Chat WebAPI", version="1.0.0", description="基于FastAPI的聊天系统后端接口")
 
 app.add_middleware(
@@ -17,13 +25,15 @@ app.add_middleware(
 )
 
 app.include_router(router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
+app.include_router(sessions_router, prefix="/api")
+app.include_router(messages_router, prefix="/api")
 
 
 @app.websocket("/ws/{username}")
 async def websocket_endpoint(websocket: WebSocket, username: str):
     await websocket.accept()
     
-    # 简化逻辑：直接记录用户连接，不踢旧连接（让前端重连处理）
     if username in online_users:
         try:
             old_ws = online_users[username]
@@ -98,6 +108,20 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/api/db-test")
+async def db_test():
+    from database.connection import SessionLocal
+    from sqlalchemy import text
+    try:
+        db = SessionLocal()
+        result = db.execute(text("SELECT VERSION()"))
+        version = result.scalar()
+        db.close()
+        return {"success": True, "mysql_version": version}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 if __name__ == "__main__":
