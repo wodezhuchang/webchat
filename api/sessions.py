@@ -1,154 +1,150 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import Optional
+from typing import Optional, List
+from pydantic import BaseModel
+from datetime import datetime
+
 from database.connection import get_db
 from database import crud
 from api.auth import get_current_user
-from database.models import User
-from models import (
-    SessionCreateRequest,
-    SessionUpdateRequest,
-    SessionResponse,
-    SessionListResponse,
-    ApiResponse
+from database.models import (
+    User,
+    ConversationParticipant,
+    Conversation
 )
 
-router = APIRouter(prefix="/sessions", tags=["会话管理"])
+router = APIRouter(prefix="/api/sessions", tags=["sessions-legacy"])
 
 
-@router.post("", response_model=SessionResponse)
-def create_session(
-    request: SessionCreateRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    if request.session_type == 2 and request.target_user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="私聊会话必须指定目标用户"
-        )
-    
-    if request.session_type == 2:
-        target_user = crud.get_user_by_id(db, request.target_user_id)
-        if not target_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="目标用户不存在"
-            )
-    
-    session = crud.create_session(
-        db=db,
-        user_id=current_user.id,
-        title=request.title,
-        session_type=request.session_type,
-        target_user_id=request.target_user_id
-    )
+class SessionResponse(BaseModel):
+    id: int
+    user_id: int
+    title: str
+    session_type: int
+    target_user_id: Optional[int] = None
+    is_active: int = 1
+    created_at: str
+    updated_at: str
+
+
+class SessionListResponse(BaseModel):
+    success: bool = True
+    sessions: List[SessionResponse]
+
+
+class ApiResponse(BaseModel):
+    success: bool = True
+    message: str = ""
+
+
+def conv_to_session_response(conv: Conversation, participant: ConversationParticipant) -> SessionResponse:
+    target_user_id = None
+    for p in conv.participants:
+        if p.user_id != participant.user_id and p.is_ai == 0:
+            target_user_id = p.user_id
+            break
     
     return SessionResponse(
-        id=session.id,
-        user_id=session.user_id,
-        title=session.title,
-        session_type=session.session_type,
-        target_user_id=session.target_user_id,
-        is_active=session.is_active,
-        created_at=session.created_at,
-        updated_at=session.updated_at
+        id=conv.id,
+        user_id=participant.user_id,
+        title=participant.title,
+        session_type=conv.type,
+        target_user_id=target_user_id,
+        is_active=1 if not participant.is_deleted else 0,
+        created_at=conv.created_at.isoformat() if conv.created_at else "",
+        updated_at=conv.updated_at.isoformat() if conv.updated_at else ""
     )
 
 
 @router.get("", response_model=SessionListResponse)
-def get_sessions(
-    is_active: Optional[int] = Query(None, description="是否活跃: 1-活跃, 0-已结束"),
+def list_sessions(
+    is_active: Optional[int] = Query(None, description="是否活跃"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    sessions = crud.get_user_sessions(db, current_user.id, is_active)
-    
-    session_responses = [
-        SessionResponse(
-            id=s.id,
-            user_id=s.user_id,
-            title=s.title,
-            session_type=s.session_type,
-            target_user_id=s.target_user_id,
-            is_active=s.is_active,
-            created_at=s.created_at,
-            updated_at=s.updated_at
-        ) for s in sessions
-    ]
-    
-    return SessionListResponse(
-        success=True,
-        sessions=session_responses
+    participants = (
+        db.query(ConversationParticipant)
+        .filter(
+            ConversationParticipant.user_id == current_user.id,
+            ConversationParticipant.is_deleted == 0
+        )
+        .all()
     )
+    
+    sessions = []
+    for p in participants:
+        sessions.append(conv_to_session_response(p.conversation, p))
+    
+    sessions.sort(key=lambda x: x.updated_at, reverse=True)
+    
+    return SessionListResponse(sessions=sessions)
 
 
-@router.get("/{session_id}", response_model=SessionResponse)
-def get_session(
-    session_id: int,
+@router.post("/ai")
+def create_ai_session(
+    title: str = Query("新对话", description="会话标题"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    session = crud.get_session_by_id(db, session_id)
+    conv, is_new = crud.get_or_create_ai_conversation(db, current_user.id)
     
-    if not session:
+    if title != "新对话" and is_new:
+        crud.update_participant_title(db, conv.id, current_user.id, title)
+    
+    participant = crud.get_participant_by_user(db, conv.id, current_user.id)
+    
+    return conv_to_session_response(conv, participant)
+
+
+@router.post("/private")
+def get_or_create_private_session(
+    target_user_id: int = Query(..., description="目标用户ID"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if target_user_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="不能与自己创建私聊会话"
+        )
+    
+    target_user = crud.get_user_by_id(db, target_user_id)
+    if not target_user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="会话不存在"
+            detail="目标用户不存在"
         )
     
-    if session.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无权访问此会话"
-        )
-    
-    return SessionResponse(
-        id=session.id,
-        user_id=session.user_id,
-        title=session.title,
-        session_type=session.session_type,
-        target_user_id=session.target_user_id,
-        is_active=session.is_active,
-        created_at=session.created_at,
-        updated_at=session.updated_at
+    conv, _ = crud.get_or_create_private_conversation(
+        db=db,
+        user_id=current_user.id,
+        target_user_id=target_user_id
     )
+    
+    participant = crud.get_participant_by_user(db, conv.id, current_user.id)
+    
+    return conv_to_session_response(conv, participant)
 
 
-@router.put("/{session_id}", response_model=SessionResponse)
+@router.put("/{session_id}")
 def update_session(
     session_id: int,
-    request: SessionUpdateRequest,
+    title: str = Query(..., description="新标题"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    session = crud.get_session_by_id(db, session_id)
+    participant = crud.get_participant_by_user(db, session_id, current_user.id)
     
-    if not session:
+    if not participant or participant.is_deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="会话不存在"
+            detail="会话不存在或无权限"
         )
     
-    if session.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无权修改此会话"
-        )
+    crud.update_participant_title(db, session_id, current_user.id, title)
     
-    if request.title is not None:
-        session = crud.update_session_title(db, session_id, request.title)
-    
-    return SessionResponse(
-        id=session.id,
-        user_id=session.user_id,
-        title=session.title,
-        session_type=session.session_type,
-        target_user_id=session.target_user_id,
-        is_active=session.is_active,
-        created_at=session.created_at,
-        updated_at=session.updated_at
-    )
+    participant = crud.get_participant_by_user(db, session_id, current_user.id)
+    return conv_to_session_response(participant.conversation, participant)
 
 
 @router.delete("/{session_id}", response_model=ApiResponse)
@@ -157,29 +153,20 @@ def delete_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    session = crud.get_session_by_id(db, session_id)
+    participant = crud.get_participant_by_user(db, session_id, current_user.id)
     
-    if not session:
+    if not participant or participant.is_deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="会话不存在"
+            detail="会话不存在或无权限"
         )
     
-    if session.user_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无权删除此会话"
-        )
-    
-    success = crud.delete_session(db, session_id)
+    success = crud.delete_conversation_for_user(db, session_id, current_user.id)
     
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="删除会话失败"
+            detail="删除失败"
         )
     
-    return ApiResponse(
-        success=True,
-        message="会话已删除"
-    )
+    return ApiResponse(success=True, message="会话已删除")

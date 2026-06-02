@@ -86,3 +86,19 @@ def get_user_id_from_token(token: str) -> Optional[int]:
         except (ValueError, TypeError):
             return None
     return None
+
+
+def get_username_from_token(token: str) -> Optional[str]:
+    payload = decode_token(token)
+    if not payload:
+        return None
+    
+    return payload.get("username")
+
+
+def get_token_type(token: str) -> Optional[str]:
+    payload = decode_token(token)
+    if not payload:
+        return None
+    
+    return payload.get("type")

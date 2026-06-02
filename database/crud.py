@@ -1,8 +1,24 @@
 from typing import List, Optional, Tuple
 from sqlalchemy.orm import Session
+from sqlalchemy import func, or_, and_
 from datetime import datetime
-from database.models import User, Session as DbSession, Message, TokenBlacklist
+from database.models import (
+    User,
+    Conversation,
+    ConversationParticipant,
+    Message,
+    MessageVisibility,
+    TokenBlacklist
+)
 from auth.password import hash_password
+
+
+SENDER_TYPE_USER = 1
+SENDER_TYPE_AI = 2
+SENDER_TYPE_SYSTEM = 3
+
+CONV_TYPE_AI = 1
+CONV_TYPE_PRIVATE = 2
 
 
 def create_user(
@@ -60,108 +76,246 @@ def update_user_profile(
     return user
 
 
-def create_session(
+def search_users(
     db: Session,
+    username: Optional[str] = None,
+    exclude_user_id: Optional[int] = None
+) -> List[User]:
+    query = db.query(User).filter(User.status == 1)
+    
+    if username:
+        query = query.filter(User.username.contains(username))
+    
+    if exclude_user_id:
+        query = query.filter(User.id != exclude_user_id)
+    
+    return query.order_by(User.username).all()
+
+
+def create_conversation(
+    db: Session,
+    conv_type: int
+) -> Conversation:
+    conv = Conversation(type=conv_type)
+    db.add(conv)
+    db.commit()
+    db.refresh(conv)
+    return conv
+
+
+def add_participant(
+    db: Session,
+    conversation_id: int,
     user_id: int,
-    title: str = "新对话",
-    session_type: int = 1,
-    target_user_id: Optional[int] = None
-) -> DbSession:
-    session = DbSession(
+    is_ai: int = 0,
+    title: str = "新对话"
+) -> ConversationParticipant:
+    participant = ConversationParticipant(
+        conversation_id=conversation_id,
         user_id=user_id,
-        title=title,
-        session_type=session_type,
-        target_user_id=target_user_id,
-        is_active=1
+        is_ai=is_ai,
+        title=title
+    )
+    db.add(participant)
+    db.commit()
+    db.refresh(participant)
+    return participant
+
+
+def get_user_conversations(
+    db: Session,
+    user_id: int
+) -> List[Tuple[Conversation, ConversationParticipant]]:
+    result = (
+        db.query(Conversation, ConversationParticipant)
+        .join(ConversationParticipant, Conversation.id == ConversationParticipant.conversation_id)
+        .filter(
+            ConversationParticipant.user_id == user_id,
+            ConversationParticipant.is_deleted == 0
+        )
+        .order_by(Conversation.updated_at.desc())
+        .all()
     )
     
-    db.add(session)
-    db.commit()
-    db.refresh(session)
+    return result
+
+
+def get_conversation_by_id(db: Session, conv_id: int) -> Optional[Conversation]:
+    return db.query(Conversation).filter(Conversation.id == conv_id).first()
+
+
+def get_participant_by_user(
+    db: Session,
+    conversation_id: int,
+    user_id: int
+) -> Optional[ConversationParticipant]:
+    return (
+        db.query(ConversationParticipant)
+        .filter(
+            ConversationParticipant.conversation_id == conversation_id,
+            ConversationParticipant.user_id == user_id
+        )
+        .first()
+    )
+
+
+def get_or_create_ai_conversation(
+    db: Session,
+    user_id: int
+) -> Tuple[Conversation, bool]:
+    existing = (
+        db.query(Conversation)
+        .join(ConversationParticipant, Conversation.id == ConversationParticipant.conversation_id)
+        .filter(
+            Conversation.type == CONV_TYPE_AI,
+            ConversationParticipant.user_id == user_id,
+            ConversationParticipant.is_deleted == 0
+        )
+        .order_by(Conversation.updated_at.desc())
+        .first()
+    )
     
-    return session
+    if existing:
+        return existing, False
+    
+    conv = create_conversation(db, CONV_TYPE_AI)
+    
+    user = get_user_by_id(db, user_id)
+    title = f"{user.nickname or user.username} 的 AI 对话"
+    
+    add_participant(db, conv.id, user_id, is_ai=0, title=title)
+    add_participant(db, conv.id, 0, is_ai=1, title="AI助手")
+    
+    return conv, True
 
 
-def get_user_sessions(
+def get_or_create_private_conversation(
     db: Session,
     user_id: int,
-    is_active: Optional[int] = None
-) -> List[DbSession]:
-    query = db.query(DbSession).filter(DbSession.user_id == user_id)
+    target_user_id: int
+) -> Tuple[Conversation, bool]:
+    existing = (
+        db.query(Conversation)
+        .join(ConversationParticipant, Conversation.id == ConversationParticipant.conversation_id)
+        .filter(
+            Conversation.type == CONV_TYPE_PRIVATE,
+            or_(
+                ConversationParticipant.user_id == user_id,
+                ConversationParticipant.user_id == target_user_id
+            )
+        )
+        .group_by(Conversation.id)
+        .having(func.count(func.distinct(ConversationParticipant.user_id)) == 2)
+        .first()
+    )
     
-    if is_active is not None:
-        query = query.filter(DbSession.is_active == is_active)
+    if existing:
+        return existing, False
     
-    return query.order_by(DbSession.updated_at.desc()).all()
+    conv = create_conversation(db, CONV_TYPE_PRIVATE)
+    
+    user = get_user_by_id(db, user_id)
+    target_user = get_user_by_id(db, target_user_id)
+    
+    add_participant(
+        db, conv.id, user_id,
+        title=f"与 {target_user.nickname or target_user.username} 的对话"
+    )
+    add_participant(
+        db, conv.id, target_user_id,
+        title=f"与 {user.nickname or user.username} 的对话"
+    )
+    
+    return conv, True
 
 
-def get_session_by_id(db: Session, session_id: int) -> Optional[DbSession]:
-    return db.query(DbSession).filter(DbSession.id == session_id).first()
-
-
-def update_session_title(
+def delete_conversation_for_user(
     db: Session,
-    session_id: int,
-    title: str
-) -> Optional[DbSession]:
-    session = get_session_by_id(db, session_id)
-    if not session:
-        return None
+    conversation_id: int,
+    user_id: int
+) -> bool:
+    participant = get_participant_by_user(db, conversation_id, user_id)
     
-    session.title = title
-    db.commit()
-    db.refresh(session)
-    
-    return session
-
-
-def deactivate_session(db: Session, session_id: int) -> Optional[DbSession]:
-    session = get_session_by_id(db, session_id)
-    if not session:
-        return None
-    
-    session.is_active = 0
-    db.commit()
-    db.refresh(session)
-    
-    return session
-
-
-def delete_session(db: Session, session_id: int) -> bool:
-    session = get_session_by_id(db, session_id)
-    if not session:
+    if not participant:
         return False
     
-    db.delete(session)
+    participant.is_deleted = 1
     db.commit()
     
     return True
 
 
-def create_message(
+def update_participant_title(
     db: Session,
-    session_id: int,
+    conversation_id: int,
+    user_id: int,
+    title: str
+) -> Optional[ConversationParticipant]:
+    participant = get_participant_by_user(db, conversation_id, user_id)
+    
+    if not participant:
+        return None
+    
+    participant.title = title
+    db.commit()
+    db.refresh(participant)
+    
+    return participant
+
+
+def update_conversation_updated_at(
+    db: Session,
+    conversation_id: int
+) -> Optional[Conversation]:
+    conv = get_conversation_by_id(db, conversation_id)
+    if not conv:
+        return None
+    
+    conv.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(conv)
+    
+    return conv
+
+
+def create_message_with_visibility(
+    db: Session,
+    conversation_id: int,
     sender_type: int,
     content: str,
     sender_id: Optional[int] = None,
-    message_type: int = 1,
-    media_url: Optional[str] = None
+    message_type: int = 1
 ) -> Message:
     message = Message(
-        session_id=session_id,
+        conversation_id=conversation_id,
         sender_type=sender_type,
         sender_id=sender_id,
         content=content,
-        message_type=message_type,
-        media_url=media_url,
-        status=1
+        message_type=message_type
     )
     
     db.add(message)
+    db.flush()
     
-    session = get_session_by_id(db, session_id)
-    if session:
-        session.updated_at = datetime.utcnow()
+    participants = (
+        db.query(ConversationParticipant)
+        .filter(
+            ConversationParticipant.conversation_id == conversation_id,
+            ConversationParticipant.is_ai == 0
+        )
+        .all()
+    )
+    
+    for p in participants:
+        visibility = MessageVisibility(
+            message_id=message.id,
+            user_id=p.user_id
+        )
+        db.add(visibility)
+    
+    conv = get_conversation_by_id(db, conversation_id)
+    if conv:
+        conv.updated_at = datetime.utcnow()
     
     db.commit()
     db.refresh(message)
@@ -169,17 +323,23 @@ def create_message(
     return message
 
 
-def get_session_messages(
+def get_conversation_messages_for_user(
     db: Session,
-    session_id: int,
+    conversation_id: int,
+    user_id: int,
     page: int = 1,
-    limit: int = 20,
-    status: Optional[int] = 1
+    limit: int = 50
 ) -> Tuple[List[Message], int]:
-    query = db.query(Message).filter(Message.session_id == session_id)
-    
-    if status is not None:
-        query = query.filter(Message.status == status)
+    query = (
+        db.query(Message)
+        .join(MessageVisibility, Message.id == MessageVisibility.message_id)
+        .filter(
+            Message.conversation_id == conversation_id,
+            MessageVisibility.user_id == user_id,
+            MessageVisibility.is_deleted == 0,
+            Message.status == 1
+        )
+    )
     
     total = query.count()
     
@@ -194,6 +354,33 @@ def get_session_messages(
     messages.reverse()
     
     return messages, total
+
+
+def get_message_by_id(db: Session, message_id: int) -> Optional[Message]:
+    return db.query(Message).filter(Message.id == message_id).first()
+
+
+def delete_message_for_user(
+    db: Session,
+    message_id: int,
+    user_id: int
+) -> bool:
+    visibility = (
+        db.query(MessageVisibility)
+        .filter(
+            MessageVisibility.message_id == message_id,
+            MessageVisibility.user_id == user_id
+        )
+        .first()
+    )
+    
+    if not visibility:
+        return False
+    
+    visibility.is_deleted = 1
+    db.commit()
+    
+    return True
 
 
 def recall_message(db: Session, message_id: int) -> Optional[Message]:
@@ -230,3 +417,8 @@ def is_token_blacklisted(db: Session, token: str) -> bool:
         .filter(TokenBlacklist.token == token)
         .first() is not None
     )
+
+
+def get_user_id_by_username(db: Session, username: str) -> Optional[int]:
+    user = get_user_by_username(db, username)
+    return user.id if user else None
