@@ -21,7 +21,8 @@ engine = create_engine(
     pool_size=DB_POOL_SIZE,
     max_overflow=DB_MAX_OVERFLOW,
     pool_timeout=DB_POOL_TIMEOUT,
-    pool_recycle=DB_POOL_RECYCLE,
+    pool_recycle=3600,
+    pool_pre_ping=True,
     echo=False
 )
 
