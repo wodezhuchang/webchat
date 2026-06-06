@@ -149,7 +149,7 @@ def create_ai_conversation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    conv, is_new = crud.get_or_create_ai_conversation(db, current_user.id)
+    conv = crud.create_ai_conversation(db, current_user.id)
     
     participant = crud.get_participant_by_user(db, conv.id, current_user.id)
     
@@ -158,7 +158,7 @@ def create_ai_conversation(
         "id": conv.id,
         "title": participant.title if participant else "新对话",
         "type": conv.type,
-        "is_new": is_new
+        "is_new": True
     }
 
 

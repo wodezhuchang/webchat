@@ -159,6 +159,21 @@ def get_participant_by_user(
     )
 
 
+def create_ai_conversation(
+    db: Session,
+    user_id: int
+) -> Conversation:
+    conv = create_conversation(db, CONV_TYPE_AI)
+    
+    user = get_user_by_id(db, user_id)
+    title = f"{user.nickname or user.username} 的 AI 对话"
+    
+    add_participant(db, conv.id, user_id, is_ai=0, title=title)
+    add_participant(db, conv.id, 0, is_ai=1, title="AI助手")
+    
+    return conv
+
+
 def get_or_create_ai_conversation(
     db: Session,
     user_id: int
@@ -178,14 +193,7 @@ def get_or_create_ai_conversation(
     if existing:
         return existing, False
     
-    conv = create_conversation(db, CONV_TYPE_AI)
-    
-    user = get_user_by_id(db, user_id)
-    title = f"{user.nickname or user.username} 的 AI 对话"
-    
-    add_participant(db, conv.id, user_id, is_ai=0, title=title)
-    add_participant(db, conv.id, 0, is_ai=1, title="AI助手")
-    
+    conv = create_ai_conversation(db, user_id)
     return conv, True
 
 
